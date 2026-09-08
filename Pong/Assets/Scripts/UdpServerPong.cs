@@ -1,0 +1,170 @@
+using UnityEngine;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Collections.Generic;
+using System.Globalization;
+
+public class UdpServerPong : MonoBehaviour
+{
+    UdpClient server;
+    IPEndPoint anyEP;
+    Thread receiveThread;
+
+    Dictionary<string, int> clientIds = new Dictionary<string, int>();
+    Dictionary<int, IPEndPoint> clientEndpoints = new Dictionary<int, IPEndPoint>();
+    int nextId = 1;
+
+    readonly object stateLock = new object();
+    float[] paddleY = new float[3]; // índice 1 e 2 (jogador 1 e 2)
+    Vector2 ballPos = Vector2.zero;
+    Vector2 ballVel = new Vector2(4f, 2f);
+    int[] score = new int[3]; // índice 1 e 2
+
+    [Header("Configuração do campo")]
+    public float paddleX1 = -8f;
+    public float paddleX2 = 8f;
+    public float paddleHalfHeight = 1f;
+    public float topLimit = 4.5f;
+    public float bottomLimit = -4.5f;
+    public float ballSpeed = 5f;
+    public float tickRate = 0.02f; // ~50 atualizações por segundo
+
+    void Start()
+    {
+        server = new UdpClient(5001);
+        anyEP = new IPEndPoint(IPAddress.Any, 0);
+        receiveThread = new Thread(ReceiveData);
+        receiveThread.IsBackground = true;
+        receiveThread.Start();
+
+        ResetBall(1);
+
+        InvokeRepeating(nameof(GameTick), 1f, tickRate);
+        Debug.Log("Servidor Pong iniciado na porta 5001");
+    }
+
+    void ReceiveData()
+    {
+        while (true)
+        {
+            byte[] data = server.Receive(ref anyEP);
+            string msg = Encoding.UTF8.GetString(data);
+            string key = anyEP.Address + ":" + anyEP.Port;
+
+            lock (stateLock)
+            {
+                if (!clientIds.ContainsKey(key))
+                {
+                    if (nextId > 2)
+                    {
+                        continue; // já existem 2 jogadores, ignora novas conexões
+                    }
+                    int id = nextId++;
+                    clientIds[key] = id;
+                    clientEndpoints[id] = new IPEndPoint(anyEP.Address, anyEP.Port);
+
+                    string assignMsg = "ASSIGN:" + id;
+                    byte[] assignData = Encoding.UTF8.GetBytes(assignMsg);
+                    server.Send(assignData, assignData.Length, anyEP);
+                }
+
+                int cid = clientIds[key];
+                // garante que o endpoint mais recente é usado (porta pode variar)
+                clientEndpoints[cid] = new IPEndPoint(anyEP.Address, anyEP.Port);
+
+                if (msg.StartsWith("PADDLE:"))
+                {
+                    float y = float.Parse(msg.Substring(7), CultureInfo.InvariantCulture);
+                    y = Mathf.Clamp(y, bottomLimit + paddleHalfHeight, topLimit - paddleHalfHeight);
+                    paddleY[cid] = y;
+                }
+            }
+        }
+    }
+
+    void GameTick()
+    {
+        lock (stateLock)
+        {
+            if (clientEndpoints.Count == 2)
+            {
+                SimulateBall(tickRate);
+            }
+            Broadcast();
+        }
+    }
+
+    void SimulateBall(float dt)
+    {
+        ballPos += ballVel * dt;
+
+        // colisão com teto/chão
+        if (ballPos.y > topLimit) { ballPos.y = topLimit; ballVel.y = -ballVel.y; }
+        if (ballPos.y < bottomLimit) { ballPos.y = bottomLimit; ballVel.y = -ballVel.y; }
+
+        // colisão com paddle 1 (esquerda)
+        if (ballVel.x < 0 && ballPos.x <= paddleX1 + 0.3f && ballPos.x >= paddleX1 - 0.3f)
+        {
+            if (Mathf.Abs(ballPos.y - paddleY[1]) <= paddleHalfHeight)
+            {
+                ballVel.x = -ballVel.x;
+                ballPos.x = paddleX1 + 0.3f;
+            }
+        }
+
+        // colisão com paddle 2 (direita)
+        if (ballVel.x > 0 && ballPos.x >= paddleX2 - 0.3f && ballPos.x <= paddleX2 + 0.3f)
+        {
+            if (Mathf.Abs(ballPos.y - paddleY[2]) <= paddleHalfHeight)
+            {
+                ballVel.x = -ballVel.x;
+                ballPos.x = paddleX2 - 0.3f;
+            }
+        }
+
+        // ponto para o jogador 2
+        if (ballPos.x < paddleX1 - 1f)
+        {
+            score[2]++;
+            ResetBall(1);
+        }
+
+        // ponto para o jogador 1
+        if (ballPos.x > paddleX2 + 1f)
+        {
+            score[1]++;
+            ResetBall(-1);
+        }
+    }
+
+    void ResetBall(int direction)
+    {
+        ballPos = Vector2.zero;
+        float randomY = Random.Range(-1.5f, 1.5f);
+        ballVel = new Vector2(ballSpeed * direction, randomY);
+    }
+
+    void Broadcast()
+    {
+        string state = "STATE:" +
+            paddleY[1].ToString("F2", CultureInfo.InvariantCulture) + ";" +
+            paddleY[2].ToString("F2", CultureInfo.InvariantCulture) + ";" +
+            ballPos.x.ToString("F2", CultureInfo.InvariantCulture) + ";" +
+            ballPos.y.ToString("F2", CultureInfo.InvariantCulture) + ";" +
+            score[1] + ";" + score[2];
+
+        byte[] data = Encoding.UTF8.GetBytes(state);
+        foreach (var kvp in clientEndpoints)
+        {
+            server.Send(data, data.Length, kvp.Value);
+        }
+    }
+
+    void OnApplicationQuit()
+    {
+        receiveThread.Abort();
+        server.Close();
+    }
+}
