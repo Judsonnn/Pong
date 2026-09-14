@@ -34,6 +34,13 @@ public class UdpServerPong : MonoBehaviour
     void Start()
     {
         server = new UdpClient(5001);
+        try
+        {
+            const int SIO_UDP_CONNRESET = -1744830452;
+            server.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+        }
+        catch { /* não crítico em outras plataformas (Mac/Linux não têm esse IOControl) */ }
+
         anyEP = new IPEndPoint(IPAddress.Any, 0);
         receiveThread = new Thread(ReceiveData);
         receiveThread.IsBackground = true;
@@ -49,7 +56,22 @@ public class UdpServerPong : MonoBehaviour
     {
         while (true)
         {
-            byte[] data = server.Receive(ref anyEP);
+            byte[] data;
+            try
+            {
+                data = server.Receive(ref anyEP);
+            }
+            catch (SocketException)
+            {
+                // cliente fechou/travou e o pacote anterior não teve resposta - ignora e segue
+                continue;
+            }
+            catch (System.Exception)
+            {
+                // socket foi fechado (OnApplicationQuit) - encerra a thread
+                break;
+            }
+
             string msg = Encoding.UTF8.GetString(data);
             string key = anyEP.Address + ":" + anyEP.Port;
 
@@ -68,6 +90,8 @@ public class UdpServerPong : MonoBehaviour
                     string assignMsg = "ASSIGN:" + id;
                     byte[] assignData = Encoding.UTF8.GetBytes(assignMsg);
                     server.Send(assignData, assignData.Length, anyEP);
+
+                    Debug.Log("[Servidor] Novo cliente conectado: " + key + " -> ID " + id);
                 }
 
                 int cid = clientIds[key];
