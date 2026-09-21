@@ -22,6 +22,11 @@ public class UdpServerPong : MonoBehaviour
     Vector2 ballVel = new Vector2(4f, 2f);
     int[] score = new int[3]; // índice 1 e 2
 
+    // --- vitória e contagem ---
+    bool gameOver = false;
+    int winnerId = 0;
+    float countdownLeft;
+
     [Header("Configuração do campo")]
     public float paddleX1 = -8f;
     public float paddleX2 = 8f;
@@ -30,6 +35,10 @@ public class UdpServerPong : MonoBehaviour
     public float bottomLimit = -4.5f;
     public float ballSpeed = 5f;
     public float tickRate = 0.02f; // ~50 atualizações por segundo
+
+    [Header("Regras da partida")]
+    public int winScore = 11;            // pontos para vencer
+    public float countdownSeconds = 3f;  // contagem antes de cada saque
 
     void Start()
     {
@@ -47,6 +56,7 @@ public class UdpServerPong : MonoBehaviour
         receiveThread.Start();
 
         ResetBall(1);
+        countdownLeft = countdownSeconds;
 
         InvokeRepeating(nameof(GameTick), 1f, tickRate);
         Debug.Log("Servidor Pong iniciado na porta 5001");
@@ -104,6 +114,10 @@ public class UdpServerPong : MonoBehaviour
                     y = Mathf.Clamp(y, bottomLimit + paddleHalfHeight, topLimit - paddleHalfHeight);
                     paddleY[cid] = y;
                 }
+                else if (msg == "RESTART" && gameOver)
+                {
+                    RestartMatch();
+                }
             }
         }
     }
@@ -112,9 +126,21 @@ public class UdpServerPong : MonoBehaviour
     {
         lock (stateLock)
         {
-            if (clientEndpoints.Count == 2)
+            if (clientEndpoints.Count < 2)
             {
-                SimulateBall(tickRate);
+                // esperando os dois jogadores: mantém a contagem "armada"
+                countdownLeft = countdownSeconds;
+            }
+            else if (!gameOver)
+            {
+                if (countdownLeft > 0f)
+                {
+                    countdownLeft -= tickRate;
+                }
+                else
+                {
+                    SimulateBall(tickRate);
+                }
             }
             Broadcast();
         }
@@ -148,19 +174,45 @@ public class UdpServerPong : MonoBehaviour
             }
         }
 
-        // ponto para o jogador 2
+        // ponto para o jogador 2 (bola passou do paddle esquerdo)
         if (ballPos.x < paddleX1 - 1f)
         {
-            score[2]++;
-            ResetBall(1);
+            OnPoint(2, 1);
         }
-
-        // ponto para o jogador 1
-        if (ballPos.x > paddleX2 + 1f)
+        // ponto para o jogador 1 (bola passou do paddle direito)
+        else if (ballPos.x > paddleX2 + 1f)
         {
-            score[1]++;
-            ResetBall(-1);
+            OnPoint(1, -1);
         }
+    }
+
+    void OnPoint(int scorer, int nextDirection)
+    {
+        score[scorer]++;
+        ResetBall(nextDirection);
+
+        if (score[scorer] >= winScore)
+        {
+            gameOver = true;
+            winnerId = scorer;
+            ballVel = Vector2.zero; // bola fica parada no centro
+            Debug.Log("[Servidor] Jogador " + scorer + " venceu!");
+        }
+        else
+        {
+            countdownLeft = countdownSeconds; // contagem antes do próximo saque
+        }
+    }
+
+    void RestartMatch()
+    {
+        score[1] = 0;
+        score[2] = 0;
+        gameOver = false;
+        winnerId = 0;
+        ResetBall(1);
+        countdownLeft = countdownSeconds;
+        Debug.Log("[Servidor] Partida reiniciada");
     }
 
     void ResetBall(int direction)
@@ -172,12 +224,19 @@ public class UdpServerPong : MonoBehaviour
 
     void Broadcast()
     {
+        // countdown: -1 = aguardando jogadores, 0 = jogo rolando, >0 = segundos restantes
+        int countdown;
+        if (clientEndpoints.Count < 2) countdown = -1;
+        else if (!gameOver && countdownLeft > 0f) countdown = Mathf.CeilToInt(countdownLeft);
+        else countdown = 0;
+
         string state = "STATE:" +
             paddleY[1].ToString("F2", CultureInfo.InvariantCulture) + ";" +
             paddleY[2].ToString("F2", CultureInfo.InvariantCulture) + ";" +
             ballPos.x.ToString("F2", CultureInfo.InvariantCulture) + ";" +
             ballPos.y.ToString("F2", CultureInfo.InvariantCulture) + ";" +
-            score[1] + ";" + score[2];
+            score[1] + ";" + score[2] + ";" +
+            countdown + ";" + (gameOver ? winnerId : 0);
 
         byte[] data = Encoding.UTF8.GetBytes(state);
         foreach (var kvp in clientEndpoints)

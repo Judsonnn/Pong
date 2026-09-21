@@ -31,6 +31,8 @@ public class UdpClientPong : MonoBehaviour
     float remotePaddleY = 0f;
     Vector2 ballState = Vector2.zero;
     int score1 = 0, score2 = 0;
+    int countdown = -1;   // -1 = aguardando jogador, 0 = jogando, >0 = contagem
+    int winnerId = 0;     // 0 = ninguém venceu ainda
     bool hasState = false;
 
     void Start()
@@ -62,6 +64,13 @@ public class UdpClientPong : MonoBehaviour
 
         lock (stateLock)
         {
+            // fim de jogo: R pede para reiniciar a partida
+            if (winnerId != 0 && Input.GetKeyDown(KeyCode.R))
+            {
+                byte[] restart = Encoding.UTF8.GetBytes("RESTART");
+                client.Send(restart, restart.Length);
+            }
+
             if (hasState)
             {
                 // paddle adversário e bola seguem o estado autoritativo do servidor
@@ -75,7 +84,25 @@ public class UdpClientPong : MonoBehaviour
 
                 if (scoreText != null)
                 {
-                    scoreText.text = score1 + "  x  " + score2;
+                    string placar = score1 + "  x  " + score2;
+
+                    if (winnerId != 0)
+                    {
+                        string quem = (winnerId == myId) ? "Você venceu!" : "Jogador " + winnerId + " venceu!";
+                        scoreText.text = placar + "\n" + quem + "\nPressione R para reiniciar";
+                    }
+                    else if (countdown < 0)
+                    {
+                        scoreText.text = placar + "\nAguardando jogador...";
+                    }
+                    else if (countdown > 0)
+                    {
+                        scoreText.text = placar + "\n" + countdown;
+                    }
+                    else
+                    {
+                        scoreText.text = placar;
+                    }
                 }
             }
         }
@@ -86,7 +113,20 @@ public class UdpClientPong : MonoBehaviour
         IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
         while (true)
         {
-            byte[] data = client.Receive(ref remoteEP);
+            byte[] data;
+            try
+            {
+                data = client.Receive(ref remoteEP);
+            }
+            catch (SocketException)
+            {
+                continue; // erro passageiro de rede - segue escutando
+            }
+            catch (System.Exception)
+            {
+                break;    // socket fechado - encerra a thread
+            }
+
             string msg = Encoding.UTF8.GetString(data);
 
             if (msg.StartsWith("ASSIGN:"))
@@ -97,7 +137,7 @@ public class UdpClientPong : MonoBehaviour
             else if (msg.StartsWith("STATE:"))
             {
                 string[] parts = msg.Substring(6).Split(';');
-                if (parts.Length == 6)
+                if (parts.Length == 8)
                 {
                     float p1 = float.Parse(parts[0], CultureInfo.InvariantCulture);
                     float p2 = float.Parse(parts[1], CultureInfo.InvariantCulture);
@@ -105,6 +145,8 @@ public class UdpClientPong : MonoBehaviour
                     float by = float.Parse(parts[3], CultureInfo.InvariantCulture);
                     int s1 = int.Parse(parts[4]);
                     int s2 = int.Parse(parts[5]);
+                    int cd = int.Parse(parts[6]);
+                    int win = int.Parse(parts[7]);
 
                     lock (stateLock)
                     {
@@ -113,6 +155,8 @@ public class UdpClientPong : MonoBehaviour
                         ballState = new Vector2(bx, by);
                         score1 = s1;
                         score2 = s2;
+                        countdown = cd;
+                        winnerId = win;
                         hasState = true;
                     }
                 }
